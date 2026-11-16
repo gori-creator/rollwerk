@@ -226,10 +226,16 @@ interface WorldAssets {
   guardrail: Model | null;
   spectators: Model[];
   houses: Model[];
-  landmark: Model | null;
+  backHouses: Model[];
+  landmarks: Model[];
+  centre: Model | null;
+  portal: Model | null;
   lamp: Model | null;
-  floating: Model | null;
+  floating: Model[];
   bridgeRail: Model | null;
+  town: { stall: Model | null; bench: Model | null; flag: Model | null; busStop: Model | null; cars: Model[] };
+  pillar: Model | null;
+  pier: Model | null;
   water: THREE.Texture | null;
   grass: THREE.Texture | null;
   rock: THREE.Texture | null;
@@ -242,8 +248,11 @@ interface WorldAssets {
 async function loadWorld(def: WorldDef): Promise<WorldAssets> {
   const k = def.key;
   const some = <T,>(xs: (T | null)[]) => xs.filter((x): x is T => x !== null);
-  const opt = (file?: string) => (file ? loadModel(`${k}/${file}`) : Promise.resolve(null));
-  const [trees, bush, rocks, flowers, fence, props, arch, guardrail, spectators, grass, rock, asphalt, backdrop, clouds, rider, houses, landmark, lamp, floating, bridgeRail, water] = await Promise.all([
+  // Dateien ohne Ordner liegen im Ordner der Welt, sonst gilt der angegebene Ordner (z. B. common/…)
+  const at = (file: string) => loadModel(file.includes('/') ? file : `${k}/${file}`);
+  const opt = (file?: string) => (file ? at(file) : Promise.resolve(null));
+  const all = (files: string[]) => Promise.all(files.map(at));
+  const [trees, bush, rocks, flowers, fence, props, arch, guardrail, spectators, grass, rock, asphalt, backdrop, clouds, rider, houses, backHouses, landmarks, centre, portal, lamp, floating, bridgeRail, water, townBits, pillar, pier] = await Promise.all([
     Promise.all(def.trees.map(async (t) => ({ model: await loadModel(`${k}/${t.file}`), weight: t.weight, scale: t.scale ?? ([0.9, 1.4] as [number, number]) }))),
     loadModel(`${k}/${def.bush}`),
     Promise.all(def.rocks.map((r) => loadModel(`${k}/${r}`))),
@@ -252,19 +261,25 @@ async function loadWorld(def: WorldDef): Promise<WorldAssets> {
     Promise.all(def.props.map(async (p) => ({ def: p, model: await loadModel(`${k}/${p.file}`) }))),
     loadModel('common/arch'),
     loadModel('common/guardrail'),
-    Promise.all([loadModel('common/spectator_1'), loadModel('common/spectator_2')]),
+    all(['common/spectator_1', 'common/spectator_2', 'common/spectator_3', 'common/spectator_4']),
     loadTexture(`${k}/grass.png`, true),
     loadTexture(`${k}/rock.png`, true),
     loadTexture('common/asphalt.png', true),
     loadTexture(`${k}/backdrop.png`, true),
     Promise.all([1, 2, 3, 4].map((i) => loadTexture(`common/cloud_${i}.png`))),
     loadRiderParts(),
-    Promise.all(def.houses.map((h) => loadModel(`${k}/${h}`))),
-    opt(def.landmark),
+    all(def.houses),
+    all(def.backHouses),
+    all(def.landmarks),
+    opt(def.centre),
+    opt(def.portal),
     opt(def.lamp),
-    opt(def.floating),
+    all(def.floating),
     opt(def.bridgeRail),
     def.water ? loadTexture(def.water, true) : Promise.resolve(null),
+    all(['common/market_stall', 'common/bench', 'common/flag_pole', 'common/bus_stop', 'common/car_1', 'common/car_2']),
+    loadModel('common/bridge_pillar'),
+    loadModel('common/pier'),
   ]);
   return {
     def,
@@ -278,10 +293,16 @@ async function loadWorld(def: WorldDef): Promise<WorldAssets> {
     guardrail,
     spectators: some(spectators),
     houses: some(houses),
-    landmark,
+    backHouses: some(backHouses),
+    landmarks: some(landmarks),
+    centre,
+    portal,
     lamp,
-    floating,
+    floating: some(floating),
     bridgeRail,
+    town: { stall: townBits[0], bench: townBits[1], flag: townBits[2], busStop: townBits[3], cars: some([townBits[4], townBits[5]]) },
+    pillar,
+    pier,
     water,
     grass,
     rock,
@@ -458,7 +479,7 @@ const mat4 = new THREE.Matrix4();
 const quat = new THREE.Quaternion();
 const yAxis = new THREE.Vector3(0, 1, 0);
 
-function instances(geometry: THREE.BufferGeometry, material: THREE.Material, items: Item[], shadow: boolean) {
+function instances(geometry: THREE.BufferGeometry, material: THREE.Material | THREE.Material[], items: Item[], shadow: boolean) {
   const im = new THREE.InstancedMesh(geometry, material, items.length);
   items.forEach((it, i) => {
     quat.setFromAxisAngle(yAxis, it.ry);
@@ -500,12 +521,18 @@ function buildStrip(path: Path, layout: Layout, d0: number, d1: number, K: Kit, 
   const rails: Item[] = [];
   const bridgeRails: Item[] = [];
   const fences: Item[] = [];
-  const houses = A.houses.map(() => [] as Item[]);
-  const lamps: Item[] = [];
-  const people = A.spectators.map(() => [] as Item[]);
-  const floats: Item[] = [];
   const pillars: Item[] = [];
-  const singles: { model: Model; item: Item }[] = [];
+  // alles Übrige: je Modell eine Liste von Standorten
+  const bag = new Map<Model, Item[]>();
+  const add = (model: Model | null | undefined, item: Item) => {
+    if (!model) return;
+    const list = bag.get(model);
+    if (list) list.push(item);
+    else bag.set(model, [item]);
+  };
+  const pick = <T,>(xs: T[], h: number): T | undefined => xs[Math.min(xs.length - 1, Math.floor(h * xs.length))];
+  let prevGorge = 0;
+  let pierDone = NaN;
   // Wasser- und Brückenflächen als Bänder entlang der Straße
   const water = { pos: [] as number[], uv: [] as number[], idx: [] as number[], last: [-1, -1] as number[] };
   const deck = { pos: [] as number[], uv: [] as number[], idx: [] as number[], last: -1 };
@@ -585,9 +612,16 @@ function buildStrip(path: Path, layout: Layout, d0: number, d1: number, K: Kit, 
         seen[slot] = true;
       }
       for (const slot of [0, 1]) if (!seen[slot]) water.last[slot] = -1;
-      if (A.floating && S.gorge < 0.02 && hash(d * 0.41, 6.1) < 0.035) {
-        const side = S.waterR > 0.9 ? 1 : S.waterL > 0.9 ? -1 : 0;
-        if (side) floats.push({ p: point(side * (55 + hash(d, 3.3) * 220), S.level - 0.12), ry: hash(d, 9.2) * 6.28, s: 1.3 });
+      const waterSide = S.waterR > 0.9 ? 1 : S.waterL > 0.9 ? -1 : 0;
+      if (A.floating.length && waterSide && hash(d * 0.41, 6.1) < 0.035) {
+        add(pick(A.floating, hash(d, 4.7)), { p: point(waterSide * (55 + hash(d, 3.3) * 220), S.level - 0.12), ry: hash(d, 9.2) * 6.28, s: 1.3 });
+      }
+      // ein Steg je See, in der Mitte des Abschnitts
+      if (A.pier && waterSide && pierDone !== S.mid && d >= S.mid) {
+        pierDone = S.mid;
+        let off = 8;
+        while (off < 200 && onLine(waterSide * off) > S.level + 0.1) off += 2;
+        add(A.pier, { p: point(waterSide * (off + A.pier.size.x / 2 - 1.5), S.level - 0.45), ry: p.heading, s: 1 });
       }
     }
 
@@ -604,9 +638,15 @@ function buildStrip(path: Path, layout: Layout, d0: number, d1: number, K: Kit, 
         deck.idx.push(q, base, q + 1, q + 1, base, base + 1, q, q + 2, base, q + 2, base + 2, base, q + 1, base + 1, q + 3, q + 3, base + 1, base + 3, q + 2, q + 3, base + 2, q + 3, base + 3, base + 2);
       }
       deck.last = base;
-      if (S.gorge > 0.9 && Math.round(d) % 30 === 0) pillars.push({ p: point(0, p.y - 1.0 - 18), ry: p.heading, s: 1 });
+      if (S.gorge > 0.9 && Math.round(d) % 30 === 0) {
+        if (A.pillar) add(A.pillar, { p: point(0, p.y - 1.0 - A.pillar.size.y * 1.4), ry: p.heading, s: 1, sy: 1.4 });
+        else pillars.push({ p: point(0, p.y - 1.0 - 18), ry: p.heading, s: 1 });
+      }
       if (rail) for (const s of [-1, 1]) bridgeRails.push({ p: point(s * 3.95, p.y - 0.06), ry: p.heading - Math.PI / 2, s: STEP / rail.size.x, sy: 1 });
     } else deck.last = -1;
+    // Tor an beiden Enden der Brücke
+    if (A.portal && prevGorge < 0.5 !== S.gorge < 0.5) add(A.portal, { p: point(0, p.y - 0.1), ry: p.heading, s: 1.05 });
+    prevGorge = S.gorge;
 
     // Leitplanke, wo es neben der Straße steil abfällt, sonst Leitpfosten
     if (!onBridge) {
@@ -623,25 +663,47 @@ function buildStrip(path: Path, layout: Layout, d0: number, d1: number, K: Kit, 
     // Dorf: Häuserreihen, Laternen, ein besonderes Gebäude und ein paar Leute
     const cell = (size: number) => Math.floor(d / size) !== Math.floor((d - STEP) / size);
     if (S.town > 0.6 && A.houses.length) {
+      const vid = Math.round(S.mid);
+      const landmarkSide = hash(vid, 2.2) > 0.5 ? 1 : -1;
+      const fromMid = d - S.mid;
+      const facing = (s: number) => p.heading - (s * Math.PI) / 2;
       for (const s of [-1, 1]) {
-        const key = Math.floor(d / 15) * 2 + s;
-        const landmarkHere = A.landmark && s === (hash(Math.round(S.mid), 2.2) > 0.5 ? 1 : -1) && Math.abs(d - S.mid) < 24;
-        if (cell(15) && hash(key, 4.4) < 0.86 && !landmarkHere) {
-          const off = s * (12.5 + hash(key, 1.2) * 3.5);
-          houses[Math.floor(hash(key, 7.7) * A.houses.length)].push({ p: point(off, onLine(off) - 0.15), ry: p.heading - (s * Math.PI) / 2 + (hash(key, 5.1) - 0.5) * 0.25, s: 0.88 + hash(key, 3.6) * 0.24 });
+        const key = Math.floor(d / 16) * 2 + s;
+        // in der Dorfmitte bleibt Platz: auf einer Seite das besondere Gebäude, gegenüber der Dorfplatz
+        const centreFree = Math.abs(fromMid) < (s === landmarkSide ? 26 : 22);
+        if (cell(16) && hash(key, 4.4) < 0.9 && !centreFree) {
+          const model = pick(A.houses, hash(key, 7.7))!;
+          const sc = 0.9 + hash(key, 3.6) * 0.2;
+          const off = s * (9.5 + (model.size.z / 2) * sc + hash(key, 1.2) * 2.5);
+          add(model, { p: point(off, onLine(off) - 0.15), ry: facing(s) + (hash(key, 5.1) - 0.5) * 0.2, s: sc });
         }
-        if (cell(21) && hash(key, 8.3) < 0.5) {
-          const off = s * (33 + hash(key, 2.9) * 14);
-          houses[Math.floor(hash(key, 6.2) * A.houses.length)].push({ p: point(off, onLine(off) - 0.15), ry: p.heading - (s * Math.PI) / 2 + (hash(key, 9.9) - 0.5) * 0.9, s: 0.9 + hash(key, 1.6) * 0.3 });
+        if (cell(22) && hash(key, 8.3) < 0.55 && !centreFree) {
+          const off = s * (36 + hash(key, 2.9) * 16);
+          add(pick(A.backHouses.length ? A.backHouses : A.houses, hash(key, 6.2)), { p: point(off, onLine(off) - 0.15), ry: facing(s) + (hash(key, 9.9) - 0.5) * 0.9, s: 0.9 + hash(key, 1.6) * 0.25 });
         }
-        if (A.lamp && cell(26)) lamps.push({ p: point(s * 5.3, onLine(s * 5.3) - 0.05), ry: p.heading, s: 1 });
-        if (A.spectators.length && hash(d * 0.77, s * 3.1) < 0.1) {
-          people[Math.floor(hash(d, s * 2.2) * A.spectators.length)].push({ p: point(s * (5 + hash(d, s) * 2.5), onLine(s * 6) - 0.05), ry: p.heading - (s * Math.PI) / 2 + (hash(d, 7.1) - 0.5), s: 1 });
+        if (A.lamp && cell(26)) add(A.lamp, { p: point(s * 5.3, onLine(s * 5.3) - 0.05), ry: p.heading, s: 1 });
+        // parkende Autos am Straßenrand
+        if (cell(11) && hash(key * 1.7, 3.9) < 0.22 && !centreFree) add(pick(A.town.cars, hash(key, 8.8)), { p: point(s * 5.2, onLine(s * 5.2) - 0.02), ry: p.heading + (s > 0 ? 0 : Math.PI), s: 1 });
+        if (A.spectators.length && hash(d * 0.77, s * 3.1) < 0.12) {
+          add(pick(A.spectators, hash(d, s * 2.2)), { p: point(s * (6.4 + hash(d, s) * 2), onLine(s * 7) - 0.05), ry: facing(s) + (hash(d, 7.1) - 0.5), s: 1 });
         }
       }
-      if (A.landmark && cell(100000) === false && Math.floor(S.mid / STEP) === Math.floor(d / STEP)) {
-        const s = hash(Math.round(S.mid), 2.2) > 0.5 ? 1 : -1;
-        singles.push({ model: A.landmark, item: { p: point(s * 20, onLine(s * 20) - 0.15), ry: p.heading - (s * Math.PI) / 2, s: 1 } });
+      // einmal je Dorf: besonderes Gebäude, Dorfplatz mit Brunnen, Marktständen, Bänken und Fahne, dazu eine Bushaltestelle
+      const once = (at: number) => fromMid >= at && fromMid - STEP < at;
+      if (once(0)) {
+        const lm = pick(A.landmarks, hash(vid, 6.6));
+        if (lm) {
+          const off = landmarkSide * (11 + lm.size.z / 2);
+          add(lm, { p: point(off, onLine(off) - 0.15), ry: facing(landmarkSide), s: 1 });
+        }
+        const o = -landmarkSide;
+        add(A.centre, { p: point(o * 14, onLine(o * 14) - 0.05), ry: p.heading, s: 1.15 });
+        add(A.town.flag, { p: point(o * 8, onLine(o * 8) - 0.05), ry: p.heading, s: 1.2 });
+      }
+      for (const [at, off, model, turn] of [
+        [-12, 11, A.town.stall, 0], [10, 12, A.town.stall, 0], [-6, 19, A.town.bench, 0], [6, 20, A.town.bench, 0], [-70, 6.6, A.town.busStop, 0],
+      ] as [number, number, Model | null, number][]) {
+        if (once(at)) add(model, { p: point(-landmarkSide * off, onLine(-landmarkSide * off) - 0.05), ry: facing(-landmarkSide) + turn, s: 1 });
       }
     }
 
@@ -809,11 +871,7 @@ function buildStrip(path: Path, layout: Layout, d0: number, d1: number, K: Kit, 
   many(A.guardrail, rails);
   many(rail, bridgeRails);
   many(A.fence, fences);
-  many(A.lamp, lamps);
-  many(A.floating, floats);
-  houses.forEach((items, h) => many(A.houses[h], items));
-  people.forEach((items, s) => many(A.spectators[s], items));
-  for (const s of singles) many(s.model, [s.item]);
+  for (const [model, items] of bag) many(model, items);
 
   // Einzelstücke außerhalb der Dörfer: Gebäude, Tiere, Bögen
   A.props.forEach(({ def: pd, model }, pi) => {

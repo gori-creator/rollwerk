@@ -40,13 +40,16 @@ export interface WorldDef {
   tuft: number | null; // Farbe der Grasbüschel, null = keine
   hills: number; // Höhe der Berge (1 = Alpen)
   sections: Section[]; // Abfolge der Abschnitte, wiederholt sich danach
-  houses: string[]; // Gebäude für Dörfer
-  landmark?: string; // ein besonderes Gebäude je Dorf
+  houses: string[]; // Gebäude für Dörfer, vordere Reihe
+  backHouses: string[]; // hintere Reihe
+  landmarks: string[]; // besondere Gebäude, eines je Dorf
+  centre: string; // Mitte des Dorfplatzes
+  portal?: string; // Tor an beiden Enden einer Brücke
   lamp?: string; // Laternen im Dorf
   water: string | null; // Textur für Seen, Flüsse und Meer
   still?: boolean; // Wasser bewegt sich nicht (Eis)
   sea?: boolean; // Wasserabschnitte sind offenes Meer bis zum Horizont
-  floating?: string; // Modell, das auf dem Wasser schwimmt
+  floating: string[]; // Modelle, die auf dem Wasser schwimmen
   bridgeRail?: string; // eigenes Geländer für Brücken
 }
 
@@ -85,8 +88,11 @@ export const WORLDS: WorldDef[] = [
       { type: 'hillside', length: 800, side: 1 }, { type: 'bridge', length: 170 }, { type: 'valley', length: 600 }, { type: 'open', length: 500 },
       { type: 'village', length: 320 }, { type: 'lake', length: 600, side: -1 }, { type: 'pass', length: 800 }, { type: 'bridge', length: 140 }, { type: 'forest', length: 450 },
     ],
-    houses: ['hut'],
-    landmark: 'chapel',
+    houses: ['hut', 'house_2', 'house_3', 'house_4'],
+    backHouses: ['barn', 'hut'],
+    landmarks: ['church', 'inn', 'chapel'],
+    centre: 'common/fountain',
+    floating: ['common/sailboat'],
     water: 'kueste/water.png',
   },
   {
@@ -122,11 +128,13 @@ export const WORLDS: WorldDef[] = [
       { type: 'bridge', length: 180 }, { type: 'open', length: 500 }, { type: 'forest', length: 400 }, { type: 'village', length: 360 }, { type: 'lake', length: 1000, side: 1 },
       { type: 'pass', length: 500 }, { type: 'bridge', length: 150 }, { type: 'open', length: 450 },
     ],
-    houses: ['house'],
-    landmark: 'lighthouse',
+    houses: ['house', 'house_2', 'house_3', 'house_4'],
+    backHouses: ['harbor_shed', 'house'],
+    landmarks: ['church', 'villa', 'lighthouse'],
+    centre: 'common/fountain',
+    floating: ['boat', 'common/sailboat'],
     water: 'kueste/water.png',
     sea: true,
-    floating: 'boat',
   },
   {
     key: 'japan',
@@ -163,9 +171,12 @@ export const WORLDS: WorldDef[] = [
       { type: 'bridge', length: 160 }, { type: 'hillside', length: 700, side: 1 }, { type: 'valley', length: 600 }, { type: 'village', length: 350 },
       { type: 'forest', length: 450 }, { type: 'lake', length: 600, side: 1 }, { type: 'bridge', length: 140 }, { type: 'open', length: 450 },
     ],
-    houses: ['house'],
-    landmark: 'shrine',
     lamp: 'lantern',
+    houses: ['house', 'house_2', 'house_3', 'house_4'],
+    backHouses: ['rice_barn', 'house_3'],
+    landmarks: ['temple', 'pagoda', 'shrine'],
+    centre: 'common/fountain',
+    floating: ['common/sailboat'],
     water: 'japan/water.png',
   },
   {
@@ -201,8 +212,11 @@ export const WORLDS: WorldDef[] = [
       { type: 'village', length: 300 }, { type: 'pass', length: 700 }, { type: 'canyon', length: 600 }, { type: 'hillside', length: 700, side: -1 },
       { type: 'bridge', length: 160 }, { type: 'open', length: 700 },
     ],
-    houses: ['diner'],
-    landmark: 'windmill',
+    houses: ['diner', 'house_2', 'house_3', 'house_4'],
+    backHouses: ['trailer', 'house_2'],
+    landmarks: ['motel', 'water_tower', 'windmill'],
+    centre: 'common/fountain',
+    floating: [],
     water: null,
   },
   {
@@ -238,7 +252,12 @@ export const WORLDS: WorldDef[] = [
       { type: 'bridge', length: 170 }, { type: 'forest', length: 500 }, { type: 'hillside', length: 700, side: -1 }, { type: 'valley', length: 500 },
       { type: 'lake', length: 600, side: -1 }, { type: 'village', length: 300 }, { type: 'bridge', length: 140 }, { type: 'open', length: 450 },
     ],
-    houses: ['cabin'],
+    houses: ['cabin', 'house_2', 'house_3', 'house_4'],
+    backHouses: ['cabin', 'house_3'],
+    landmarks: ['church', 'mill'],
+    centre: 'common/fountain',
+    floating: ['common/sailboat'],
+    portal: 'covered_bridge',
     water: 'japan/water.png',
     bridgeRail: 'bridge',
   },
@@ -275,8 +294,12 @@ export const WORLDS: WorldDef[] = [
       { type: 'valley', length: 600 }, { type: 'bridge', length: 160 }, { type: 'pass', length: 800 }, { type: 'hillside', length: 700, side: 1 },
       { type: 'village', length: 300 }, { type: 'lake', length: 600, side: -1 }, { type: 'bridge', length: 140 }, { type: 'forest', length: 450 },
     ],
-    houses: ['cabin'],
     lamp: 'lamp',
+    houses: ['cabin', 'house_2', 'house_3', 'house_4'],
+    backHouses: ['cabin', 'house_3'],
+    landmarks: ['church', 'ski_hut'],
+    centre: 'christmas_tree',
+    floating: [],
     water: 'winter/ice.png',
     still: true,
   },

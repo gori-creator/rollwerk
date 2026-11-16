@@ -168,7 +168,7 @@ let partsPromise: Promise<RiderParts | null> | null = null;
 export function loadRiderParts(): Promise<RiderParts | null> {
   partsPromise ??= Promise.all([loadModel('common/rider'), loadModel('common/bike_frame'), loadModel('common/wheel')]).then(([rider, frame, wheel]) => {
     if (!rider || !frame || !wheel) return null;
-    return { rider: rig(rider.geometry), riderMap: rider.material.map, frame: { ...frame, geometry: stripCranks(frame.geometry) }, wheel };
+    return { rider: rig(rider.geometry), riderMap: rider.map, frame: { ...frame, geometry: stripCranks(frame.geometry) }, wheel };
   });
   return partsPromise;
 }
@@ -195,13 +195,13 @@ export function makeAssetRider(parts: RiderParts, jersey: number, opacity: numbe
   const shadow = !transparent;
 
   // ----- Rad -----
-  const fade = <T extends THREE.Material>(m: T) => {
-    if (!transparent) return m;
+  const fadeOne = (m: THREE.Material) => {
     const c = m.clone();
     c.transparent = true;
     c.opacity = opacity;
-    return c as T;
+    return c;
   };
+  const fade = (m: THREE.Material | THREE.Material[]) => (!transparent ? m : Array.isArray(m) ? m.map(fadeOne) : fadeOne(m));
   const bike = new THREE.Group();
   bike.rotation.y = -Math.PI / 2; // Modell zeigt nach +x, gefahren wird nach +z
   bike.scale.setScalar(BIKE_SCALE);
