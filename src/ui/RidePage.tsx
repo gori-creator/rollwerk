@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { finishRide, log, rideActions, updateProfile, useApp, type AppState, type RideView } from '../core/app';
 import { World3D } from './World3D';
+import { WORLDS } from './worlds';
 import { dbPut } from '../core/db';
 import { fmtKm, fmtTime, zoneOf } from '../core/stats';
 import { stravaUpload } from '../core/strava';
@@ -109,7 +110,7 @@ export function RidePage() {
 
   return (
     <div className={`ride-screen ${flat ? 'is-flat' : ''}`}>
-      {!flat && <World3D low={!!app.profile.lowGraphics} />}
+      {!flat && <World3D low={!!app.profile.lowGraphics} world={app.profile.world} />}
       <div className="hud-top">
         <div className="metrics">
           {fields.map((f) => <Metric key={f.id} label={f.label.replace(' (Workout)', '')} c={f.cell(r, app)} />)}
@@ -183,7 +184,12 @@ export function RidePage() {
           <span className="spacer" />
           {r.route && !r.route.synthetic && <button onClick={() => setMap(!map)}>{map ? 'Karte aus' : 'Karte an'}</button>}
           {!flat && (
-            <button onClick={() => updateProfile({ lowGraphics: !app.profile.lowGraphics })} title="Niedrig: ohne Gras und Schatten, mit einfacheren Bäumen – für Rechner ohne starke Grafikkarte">
+            <select value={app.profile.world ?? WORLDS[0].key} onChange={(e) => updateProfile({ world: e.target.value })} title="Welt wählen">
+              {WORLDS.map((w) => <option key={w.key} value={w.key}>{w.name}</option>)}
+            </select>
+          )}
+          {!flat && (
+            <button onClick={() => updateProfile({ lowGraphics: !app.profile.lowGraphics })} title="Niedrig: ohne Gras und Schatten, volle Modelle nur ganz in der Nähe – für Rechner ohne starke Grafikkarte">
               Grafik: {app.profile.lowGraphics ? 'niedrig' : 'hoch'}
             </button>
           )}

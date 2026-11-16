@@ -28,7 +28,7 @@ Zum Entwickeln: `npm run dev` (gleiche Adresse, lädt Änderungen sofort neu). T
 - Verlauf mit Kennzahlen, FIT-Export und Upload zu Strava
 - Watt halten, virtuelle Schaltung (Pfeiltasten), Tempomacher mit Windschatten, Ghost der schnellsten eigenen Fahrt
 - Wählbare Datenfelder, FTP-Tests (Rampe und 20 Minuten), erzeugte Anstiege, automatischer Strava-Upload
-- 3D-Ansicht der Fahrt (abschaltbar), Höhenprofil nach Steigung eingefärbt
+- 3D-Ansicht der Fahrt mit sechs Welten aus den Modellen unter `public/assets` (abschaltbar), Höhenprofil nach Steigung eingefärbt
 - Demo-Trainer zum Ausprobieren ohne Hardware
 
 ## Aufbau

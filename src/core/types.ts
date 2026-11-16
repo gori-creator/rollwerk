@@ -6,6 +6,7 @@ export interface Profile {
   difficulty: number; // 0..1 Anteil der Steigung, der an die Rolle geht
   hud?: string[]; // gewählte Datenfelder im Fahrtbildschirm
   autoStrava?: boolean; // Fahrten nach dem Beenden automatisch hochladen
+  world?: string; // gewählte 3D-Welt
   lowGraphics?: boolean; // einfachere 3D-Grafik: ohne Gras und Schatten
   flatView?: boolean; // 3D-Ansicht ausschalten (für schwache Rechner)
 }

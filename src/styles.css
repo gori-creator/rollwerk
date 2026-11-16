@@ -113,3 +113,7 @@ input[type=checkbox] { accent-color:var(--accent); width:16px; height:16px; }
 .hud-bottom .controls button.danger { background:var(--danger); border-color:var(--danger); }
 .hud-bottom .demo-slider { margin-top:0; min-width:150px; }
 @media (max-height:640px) { .hud-map { display:none; } .ride-screen .metric:first-child .metric-value { font-size:36px; } }
+
+.world-state { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); background:rgba(12,15,22,.78); border:1px solid rgba(255,255,255,.14); border-radius:999px; padding:10px 22px; font-weight:600; }
+select { font:inherit; color:var(--text); background:rgba(38,44,58,.9); border:1px solid rgba(255,255,255,.14); border-radius:10px; padding:8px 10px; }
+.world-canvas { position:absolute; inset:0; }
