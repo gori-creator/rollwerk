@@ -12,7 +12,7 @@ import type { Route } from '../core/types';
 import { loadModel, loadTexture, type Model } from './assets';
 import { loadRiderParts, makeAssetRider, type RiderParts } from './riderModel';
 import { makeRider, toon } from './riderSimple';
-import { worldByKey, type PropDef, type WorldDef } from './worlds';
+import { worldByKey, type PropDef, type Section, type WorldDef } from './worlds';
 
 const STEP = 5; // m zwischen Wegpunkten
 const CHUNK = 100; // m, Bewuchs wird in Abschnitten verwaltet
@@ -54,8 +54,8 @@ class Path {
   }
 
   private heading(d: number) {
-    // Krümmung bleibt klein (Radius > 300 m), damit sich das Gelände nie überlappt
-    return 0.5 * Math.sin(d / 260 + this.phase) + 0.18 * Math.sin(d / 140 + this.phase * 2.3);
+    // Krümmung bleibt klein (Radius > 900 m), damit sich das weite Gelände nie überlappt
+    return 0.45 * Math.sin(d / 700 + this.phase) + 0.12 * Math.sin(d / 260 + this.phase * 2.3);
   }
 
   private ensure(index: number) {
@@ -89,15 +89,129 @@ class Path {
   }
 }
 
-const HALF = [3.6, 4.6, 6.5, 9, 13, 18, 25, 34, 46, 62, 82, 108, 140, 180, 230, 290];
+const HALF = [3.6, 4.6, 6.5, 9, 13, 18, 25, 34, 46, 62, 82, 108, 140, 180, 230, 290, 360, 440, 530, 630, 740];
 const OFFSETS = [...HALF.map((v) => -v).reverse(), ...HALF];
 const ROAD_HALF = 3.6;
+const FAR = HALF[HALF.length - 1];
 
-function terrainHeight(x: number, z: number, roadY: number, off: number, hillScale: number) {
+/** Form der Landschaft an einer Stelle der Straße. */
+interface Shape {
+  hill: number; // Hügel neben der Straße
+  tiltL: number; // Hang: Steigung quer zur Straße (positiv = bergauf)
+  tiltR: number;
+  mountL: number; // Höhe der Berge in der Ferne
+  mountR: number;
+  flat: number; // Breite der ebenen Fläche neben der Straße in m
+  trees: number;
+  town: number; // 1 = Dorf
+  rocky: number;
+  gorge: number; // 1 = Schlucht unter einer Brücke
+  waterL: number; // 1 = Wasser auf dieser Seite
+  waterR: number;
+  level: number; // Höhe des Wasserspiegels
+  mid: number; // Mitte des aktuellen Abschnitts (Distanz)
+}
+
+const BASE = { hill: 0.5, tiltL: 0, tiltR: 0, mountL: 0.8, mountR: 0.8, flat: 10, trees: 1, town: 0, rocky: 0, gorge: 0, waterL: 0, waterR: 0 };
+function shapeOf(sec: Section): typeof BASE {
+  const r = sec.side !== -1; // Wasser bzw. Abhang rechts
+  switch (sec.type) {
+    case 'open': return { ...BASE, hill: 0.3, mountL: 0.22, mountR: 0.3, flat: 40, trees: 0.35 };
+    case 'valley': return { ...BASE, hill: 0.9, mountL: 1.1, mountR: 1.1, flat: 8 };
+    case 'forest': return { ...BASE, hill: 0.45, mountL: 0.6, mountR: 0.45, trees: 2.4 };
+    case 'village': return { ...BASE, hill: 0.12, mountL: 0.5, mountR: 0.35, flat: 75, trees: 0.3, town: 1 };
+    case 'lake': return { ...BASE, hill: 0.4, mountL: 0.9, mountR: 0.9, flat: 14, trees: 0.8, waterL: r ? 0 : 1, waterR: r ? 1 : 0 };
+    case 'hillside': return { ...BASE, hill: 0.4, tiltL: r ? 0.32 : -0.24, tiltR: r ? -0.24 : 0.32, mountL: 1, mountR: 1, flat: 6, trees: 0.9 };
+    case 'bridge': return { ...BASE, hill: 0.5, gorge: 1, trees: 0.6 };
+    case 'pass': return { ...BASE, hill: 1.1, mountL: 1.35, mountR: 1.35, flat: 6, trees: 0.12, rocky: 1 };
+    case 'canyon': return { ...BASE, hill: 0, tiltL: 0.95, tiltR: 0.95, mountL: 0.35, mountR: 0.35, flat: 14, trees: 0.12, rocky: 1 };
+  }
+}
+
+/** Abfolge der Landschaftsabschnitte entlang der Straße; wiederholt sich nach der Gesamtlänge. */
+class Layout {
+  private starts: number[] = [];
+  private total = 0;
+  private levels = new Map<number, number>();
+  private seaLevel: number;
+
+  constructor(private def: WorldDef, private path: Path, route?: Route) {
+    for (const s of def.sections) {
+      this.starts.push(this.total);
+      this.total += s.length;
+    }
+    // Meer: ein fester Wasserspiegel knapp unter dem tiefsten Punkt der Strecke
+    let lowest = 0;
+    if (route) for (let d = 0; d <= route.distance; d += 50) lowest = Math.min(lowest, path.at(d).y);
+    this.seaLevel = lowest - 4;
+  }
+
+  /** Wasserspiegel eines Abschnitts: knapp unter dem tiefsten Punkt der Straße dort. */
+  private levelOf(occ: number, start: number, sec: Section) {
+    if (this.def.sea && sec.type !== 'bridge') return this.seaLevel;
+    let v = this.levels.get(occ);
+    if (v === undefined) {
+      let low = Infinity;
+      for (let d = start - 130; d <= start + sec.length + 130; d += 20) low = Math.min(low, this.path.at(d).y);
+      v = low - (sec.type === 'bridge' ? 21 : 3);
+      this.levels.set(occ, v);
+    }
+    return v;
+  }
+
+  at(d: number): Shape {
+    const n = this.def.sections.length;
+    const lap = Math.floor(d / this.total);
+    const local = d - lap * this.total;
+    let i = n - 1;
+    while (i > 0 && this.starts[i] > local) i--;
+    const sec = this.def.sections[i];
+    const next = this.def.sections[(i + 1) % n];
+    const start = lap * this.total + this.starts[i];
+    const a = shapeOf(sec);
+    const b = shapeOf(next);
+    // weicher Übergang am Ende des Abschnitts; Brücken beginnen und enden abrupter
+    const blend = sec.type === 'bridge' || next.type === 'bridge' ? 26 : Math.min(130, sec.length / 3);
+    const t = smooth(sec.length - blend, sec.length, d - start);
+    const out = {} as Record<string, number>;
+    for (const k of Object.keys(a) as (keyof typeof BASE)[]) out[k] = lerp(a[k], b[k], t);
+    const wet = (x: typeof BASE) => x.waterL + x.waterR + x.gorge > 0;
+    const level = wet(a) || !wet(b) ? this.levelOf(lap * n + i, start, sec) : this.levelOf(lap * n + i + 1, start + sec.length, next);
+    return { ...(out as unknown as typeof BASE), level, mid: start + sec.length / 2 };
+  }
+}
+
+function terrainHeight(x: number, z: number, roadY: number, off: number, S: Shape, def: WorldDef) {
   const a = Math.abs(off);
-  const hills = (fbm(x / 240, z / 240) - 0.42) * 120 + (noise(x / 26, z / 26) - 0.5) * 3;
-  const peaks = smooth(110, 290, a) * (0.25 + fbm(x / 380 + 7, z / 380)) * 230;
-  return roadY + (smooth(7, 95, a) * hills + peaks) * hillScale - smooth(ROAD_HALF, 6.5, a) * 0.4;
+  const left = off < 0;
+  const tilt = left ? S.tiltL : S.tiltR;
+  const mount = left ? S.mountL : S.mountR;
+  const water = left ? S.waterL : S.waterR;
+
+  // sanfte Hügel nahe der Straße
+  let hills = (fbm(x / 240, z / 240) - 0.42) * 120;
+  if (hills < 0) hills *= 0.3;
+  let h = smooth(S.flat, S.flat + 90, a) * hills * S.hill * def.hills + (noise(x / 26, z / 26) - 0.5) * 3 * smooth(7, 30, a);
+  // Hang quer zur Straße
+  h += tilt * Math.min(Math.max(0, a - 10), 150);
+  // echte Berge erst in einiger Entfernung, mit Graten statt gleichmäßiger Wände
+  const ridge = 1 - Math.abs(2 * fbm(x / 430 + 7, z / 430) - 1);
+  h += smooth(200, 740, a) * (0.18 + ridge * ridge * 1.1 + fbm(x / 150, z / 150) * 0.3) * 270 * mount * def.hills;
+  let y = roadY + h - smooth(ROAD_HALF, 6.5, a) * 0.4;
+
+  // Schlucht unter einer Brücke
+  if (S.gorge > 0) {
+    const floor = roadY - 27 + (noise(x / 40, z / 40) - 0.5) * 4 + smooth(140, 380, a) * 36;
+    y = lerp(y, Math.min(y, floor), S.gorge);
+  }
+  // See oder Meer: das Ufer fällt zum Wasser ab, beim See steigt es gegenüber wieder an
+  if (water > 0) {
+    const shore = smooth(8, 26 + Math.max(0, roadY - S.level) * 2.1, a);
+    const bed = S.level - 2 - smooth(20, 160, a) * 6;
+    const target = def.sea ? bed : lerp(bed, Math.max(y, S.level + 2), smooth(300, 480, a));
+    y = lerp(y, lerp(y, target, shore), water);
+  }
+  return y;
 }
 
 interface WorldAssets {
@@ -111,6 +225,12 @@ interface WorldAssets {
   arch: Model | null;
   guardrail: Model | null;
   spectators: Model[];
+  houses: Model[];
+  landmark: Model | null;
+  lamp: Model | null;
+  floating: Model | null;
+  bridgeRail: Model | null;
+  water: THREE.Texture | null;
   grass: THREE.Texture | null;
   rock: THREE.Texture | null;
   asphalt: THREE.Texture | null;
@@ -122,7 +242,8 @@ interface WorldAssets {
 async function loadWorld(def: WorldDef): Promise<WorldAssets> {
   const k = def.key;
   const some = <T,>(xs: (T | null)[]) => xs.filter((x): x is T => x !== null);
-  const [trees, bush, rocks, flowers, fence, props, arch, guardrail, spectators, grass, rock, asphalt, backdrop, clouds, rider] = await Promise.all([
+  const opt = (file?: string) => (file ? loadModel(`${k}/${file}`) : Promise.resolve(null));
+  const [trees, bush, rocks, flowers, fence, props, arch, guardrail, spectators, grass, rock, asphalt, backdrop, clouds, rider, houses, landmark, lamp, floating, bridgeRail, water] = await Promise.all([
     Promise.all(def.trees.map(async (t) => ({ model: await loadModel(`${k}/${t.file}`), weight: t.weight, scale: t.scale ?? ([0.9, 1.4] as [number, number]) }))),
     loadModel(`${k}/${def.bush}`),
     Promise.all(def.rocks.map((r) => loadModel(`${k}/${r}`))),
@@ -138,6 +259,12 @@ async function loadWorld(def: WorldDef): Promise<WorldAssets> {
     loadTexture(`${k}/backdrop.png`, true),
     Promise.all([1, 2, 3, 4].map((i) => loadTexture(`common/cloud_${i}.png`))),
     loadRiderParts(),
+    Promise.all(def.houses.map((h) => loadModel(`${k}/${h}`))),
+    opt(def.landmark),
+    opt(def.lamp),
+    opt(def.floating),
+    opt(def.bridgeRail),
+    def.water ? loadTexture(def.water, true) : Promise.resolve(null),
   ]);
   return {
     def,
@@ -150,6 +277,12 @@ async function loadWorld(def: WorldDef): Promise<WorldAssets> {
     arch,
     guardrail,
     spectators: some(spectators),
+    houses: some(houses),
+    landmark,
+    lamp,
+    floating,
+    bridgeRail,
+    water,
     grass,
     rock,
     asphalt,
@@ -313,6 +446,8 @@ interface Kit {
   postGeo: THREE.BufferGeometry;
   postMat: THREE.Material;
   signMat: THREE.Material;
+  waterMat: THREE.Material | null;
+  stoneMat: THREE.Material;
   low: boolean;
 }
 
@@ -336,7 +471,7 @@ function instances(geometry: THREE.BufferGeometry, material: THREE.Material, ite
 }
 
 /** Baut Gelände, Straße und alles, was darauf steht, für den Abschnitt d0…d1. */
-function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | undefined) {
+function buildStrip(path: Path, layout: Layout, d0: number, d1: number, K: Kit, route: Route | undefined) {
   const { A, low } = K;
   const def = A.def;
   const group = new THREE.Group();
@@ -350,6 +485,7 @@ function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | u
   const ruv = new Float32Array(n * 2 * 2);
   const heights = new Float32Array(n * m);
   const nearLateral = low ? 28 : 70;
+  const shadow = !low;
 
   const chunkCount = Math.ceil((d1 - d0) / CHUNK);
   const lists = Array.from({ length: chunkCount }, () => ({
@@ -362,31 +498,45 @@ function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | u
   const tufts: { p: THREE.Vector3; c: THREE.Color; s: number; r: number }[] = [];
   const posts: Item[] = [];
   const rails: Item[] = [];
+  const bridgeRails: Item[] = [];
   const fences: Item[] = [];
+  const houses = A.houses.map(() => [] as Item[]);
+  const lamps: Item[] = [];
+  const people = A.spectators.map(() => [] as Item[]);
+  const floats: Item[] = [];
+  const pillars: Item[] = [];
+  const singles: { model: Model; item: Item }[] = [];
+  // Wasser- und Brückenflächen als Bänder entlang der Straße
+  const water = { pos: [] as number[], uv: [] as number[], idx: [] as number[], last: [-1, -1] as number[] };
+  const deck = { pos: [] as number[], uv: [] as number[], idx: [] as number[], last: -1 };
   const totalWeight = A.trees.reduce((a, t) => a + t.weight, 0);
   const tuftColor = def.tuft !== null ? new THREE.Color(def.tuft) : null;
+  const rail = A.bridgeRail ?? A.guardrail;
 
   /** Geländehöhe an beliebiger Stelle neben der Straße. */
   const ground = (d: number, off: number) => {
     const p = path.at(d);
+    const S = layout.at(d);
     const x = p.x + Math.cos(p.heading) * off;
     const z = p.z - Math.sin(p.heading) * off;
-    return { v: new THREE.Vector3(x, terrainHeight(x, z, p.y, off, def.hills), z), heading: p.heading, roadY: p.y };
+    return { v: new THREE.Vector3(x, terrainHeight(x, z, p.y, off, S, def), z), heading: p.heading, roadY: p.y, S };
   };
 
   for (let i = 0; i < n; i++) {
     const d = d0 + i * STEP;
     const p = path.at(d);
+    const S = layout.at(d);
     const rx = Math.cos(p.heading); // Vektor quer zur Fahrtrichtung
     const rz = -Math.sin(p.heading);
     const alt = path.altitude(d);
     const ci = Math.min(chunkCount - 1, Math.floor((d - d0) / CHUNK));
+    const onBridge = S.gorge > 0.25;
     for (let j = 0; j < m; j++) {
       const off = OFFSETS[j];
       const a = Math.abs(off);
       const x = p.x + rx * off;
       const z = p.z + rz * off;
-      const y = terrainHeight(x, z, p.y, off, def.hills);
+      const y = terrainHeight(x, z, p.y, off, S, def);
       heights[i * m + j] = y;
       pos.set([x, y, z], (i * m + j) * 3);
       uv.set([x / 11, z / 11], (i * m + j) * 2);
@@ -395,10 +545,10 @@ function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | u
       const tint = 0.93 * (1 + 0.16 * smooth(0.47, 0.53, fbm(x / 55, z / 55))) * (1 - 0.2 * smooth(25, 70, rel)) * (a < 4.7 ? 0.9 : 1);
       col.set([tint, tint, tint], (i * m + j) * 3);
       const wobble = (noise(x / 30, z / 30) - 0.5) * 30;
-      mix.set(
-        [smooth(def.rockBand[0], def.rockBand[1], rel + wobble), def.snowBand ? smooth(def.snowBand[0], def.snowBand[1], rel + (alt - 900) / 9 + wobble) : 0],
-        (i * m + j) * 2,
-      );
+      let rockMix = smooth(def.rockBand[0], def.rockBand[1], rel + wobble + S.rocky * 55);
+      // Schluchtwände sind felsig, im Dorf ist der Boden neben der Straße gepflastert
+      rockMix = Math.max(rockMix, S.gorge * smooth(-3, -12, rel), a < 22 ? S.town * 0.8 * smooth(0.5, 0.9, S.town) : 0);
+      mix.set([rockMix, def.snowBand ? smooth(def.snowBand[0], def.snowBand[1], rel * 0.55 + (alt - 900) / 9 + wobble) : 0], (i * m + j) * 2);
     }
     rpos.set([p.x - rx * ROAD_HALF, p.y + 0.03, p.z - rz * ROAD_HALF, p.x + rx * ROAD_HALF, p.y + 0.03, p.z + rz * ROAD_HALF], i * 6);
     ruv.set([0, d / 12, 1, d / 12], i * 4);
@@ -410,78 +560,158 @@ function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | u
       const t = (off - OFFSETS[j]) / (OFFSETS[j + 1] - OFFSETS[j]);
       return lerp(heights[i * m + j], heights[i * m + j + 1], t);
     };
+    const wet = (off: number, y: number) => (off < 0 ? S.waterL : S.waterR) + S.gorge > 0.3 && y < S.level + 0.7;
+    const point = (off: number, y: number, al = 0) => new THREE.Vector3(p.x + rx * off + Math.sin(p.heading) * al, y, p.z + rz * off + Math.cos(p.heading) * al);
+
+    // Wasser: See und Meer auf einer Seite, Fluss in der Schlucht über die ganze Breite
+    if (K.waterMat) {
+      const reach = def.sea ? 2800 : FAR;
+      const spans: [number, number, number][] = [];
+      if (S.gorge > 0.02) spans.push([0, -FAR, FAR]);
+      else {
+        if (S.waterL > 0.02) spans.push([0, -reach, -5]);
+        if (S.waterR > 0.02) spans.push([1, 5, reach]);
+      }
+      const seen = [false, false];
+      for (const [slot, from, to] of spans) {
+        const base = water.pos.length / 3;
+        for (const off of [from, to]) {
+          const v = point(off, S.level);
+          water.pos.push(v.x, v.y, v.z);
+          water.uv.push(v.x / 26, v.z / 26);
+        }
+        if (water.last[slot] >= 0) water.idx.push(water.last[slot], base, water.last[slot] + 1, water.last[slot] + 1, base, base + 1);
+        water.last[slot] = base;
+        seen[slot] = true;
+      }
+      for (const slot of [0, 1]) if (!seen[slot]) water.last[slot] = -1;
+      if (A.floating && S.gorge < 0.02 && hash(d * 0.41, 6.1) < 0.035) {
+        const side = S.waterR > 0.9 ? 1 : S.waterL > 0.9 ? -1 : 0;
+        if (side) floats.push({ p: point(side * (55 + hash(d, 3.3) * 220), S.level - 0.12), ry: hash(d, 9.2) * 6.28, s: 1.3 });
+      }
+    }
+
+    // Brücke: Fahrbahnplatte, Pfeiler und Geländer
+    if (S.gorge > 0.02) {
+      const base = deck.pos.length / 3;
+      for (const [off, dy] of [[-4.2, -0.06], [4.2, -0.06], [-4.2, -1.0], [4.2, -1.0]]) {
+        const v = point(off, p.y + dy);
+        deck.pos.push(v.x, v.y, v.z);
+        deck.uv.push(off / 5, d / 5);
+      }
+      if (deck.last >= 0) {
+        const q = deck.last;
+        deck.idx.push(q, base, q + 1, q + 1, base, base + 1, q, q + 2, base, q + 2, base + 2, base, q + 1, base + 1, q + 3, q + 3, base + 1, base + 3, q + 2, q + 3, base + 2, q + 3, base + 3, base + 2);
+      }
+      deck.last = base;
+      if (S.gorge > 0.9 && Math.round(d) % 30 === 0) pillars.push({ p: point(0, p.y - 1.0 - 18), ry: p.heading, s: 1 });
+      if (rail) for (const s of [-1, 1]) bridgeRails.push({ p: point(s * 3.95, p.y - 0.06), ry: p.heading - Math.PI / 2, s: STEP / rail.size.x, sy: 1 });
+    } else deck.last = -1;
 
     // Leitplanke, wo es neben der Straße steil abfällt, sonst Leitpfosten
-    for (const s of [-1, 1]) {
-      const drop = onLine(s * 13) - p.y;
-      if (A.guardrail && drop < -1.7) {
-        rails.push({ p: new THREE.Vector3(p.x + rx * s * 4.2, p.y - 0.12, p.z + rz * s * 4.2), ry: p.heading - Math.PI / 2, s: STEP / A.guardrail.size.x, sy: 1 });
-      } else if (Math.round(d) % 50 === 0) {
-        posts.push({ p: new THREE.Vector3(p.x + rx * s * 4.3, p.y - 0.05, p.z + rz * s * 4.3), ry: p.heading, s: 1 });
+    if (!onBridge) {
+      for (const s of [-1, 1]) {
+        const drop = onLine(s * 13) - p.y;
+        if (A.guardrail && drop < -1.7) {
+          rails.push({ p: point(s * 4.2, p.y - 0.12), ry: p.heading - Math.PI / 2, s: STEP / A.guardrail.size.x, sy: 1 });
+        } else if (Math.round(d) % 50 === 0 && S.town < 0.5) {
+          posts.push({ p: point(s * 4.3, p.y - 0.05), ry: p.heading, s: 1 });
+        }
+      }
+    }
+
+    // Dorf: Häuserreihen, Laternen, ein besonderes Gebäude und ein paar Leute
+    const cell = (size: number) => Math.floor(d / size) !== Math.floor((d - STEP) / size);
+    if (S.town > 0.6 && A.houses.length) {
+      for (const s of [-1, 1]) {
+        const key = Math.floor(d / 15) * 2 + s;
+        const landmarkHere = A.landmark && s === (hash(Math.round(S.mid), 2.2) > 0.5 ? 1 : -1) && Math.abs(d - S.mid) < 24;
+        if (cell(15) && hash(key, 4.4) < 0.86 && !landmarkHere) {
+          const off = s * (12.5 + hash(key, 1.2) * 3.5);
+          houses[Math.floor(hash(key, 7.7) * A.houses.length)].push({ p: point(off, onLine(off) - 0.15), ry: p.heading - (s * Math.PI) / 2 + (hash(key, 5.1) - 0.5) * 0.25, s: 0.88 + hash(key, 3.6) * 0.24 });
+        }
+        if (cell(21) && hash(key, 8.3) < 0.5) {
+          const off = s * (33 + hash(key, 2.9) * 14);
+          houses[Math.floor(hash(key, 6.2) * A.houses.length)].push({ p: point(off, onLine(off) - 0.15), ry: p.heading - (s * Math.PI) / 2 + (hash(key, 9.9) - 0.5) * 0.9, s: 0.9 + hash(key, 1.6) * 0.3 });
+        }
+        if (A.lamp && cell(26)) lamps.push({ p: point(s * 5.3, onLine(s * 5.3) - 0.05), ry: p.heading, s: 1 });
+        if (A.spectators.length && hash(d * 0.77, s * 3.1) < 0.1) {
+          people[Math.floor(hash(d, s * 2.2) * A.spectators.length)].push({ p: point(s * (5 + hash(d, s) * 2.5), onLine(s * 6) - 0.05), ry: p.heading - (s * Math.PI) / 2 + (hash(d, 7.1) - 0.5), s: 1 });
+        }
+      }
+      if (A.landmark && cell(100000) === false && Math.floor(S.mid / STEP) === Math.floor(d / STEP)) {
+        const s = hash(Math.round(S.mid), 2.2) > 0.5 ? 1 : -1;
+        singles.push({ model: A.landmark, item: { p: point(s * 20, onLine(s * 20) - 0.15), ry: p.heading - (s * Math.PI) / 2, s: 1 } });
       }
     }
 
     // Grasbüschel nahe der Straße (nur im Bereich um den Fahrer)
-    if (tuftColor && !low && d > d0 + 250 && d < d0 + 850) {
+    if (tuftColor && !low && !onBridge && d > d0 + 250 && d < d0 + 850) {
       for (let k = 0; k < 84; k++) {
         const off = (k % 2 ? 1 : -1) * (4.7 + hash(d * 0.19 + k, k * 2.3) ** 1.5 * 34);
+        if (S.town > 0.5 && Math.abs(off) < 23) continue;
         const along = (hash(k * 1.7, d * 0.31) - 0.5) * STEP;
-        const x = p.x + rx * off + Math.sin(p.heading) * along;
-        const z = p.z + rz * off + Math.cos(p.heading) * along;
-        const light = 1 + 0.16 * smooth(0.47, 0.53, fbm(x / 55, z / 55));
-        tufts.push({
-          p: new THREE.Vector3(x, onLine(off) + along * p.grade - 0.04, z),
-          c: tuftColor.clone().multiplyScalar(light * (0.92 + hash(k, d) * 0.18)),
-          s: 0.7 + hash(d, k * 3.9) * 0.9,
-          r: hash(k, d * 0.7) * 3.14,
-        });
+        const y = onLine(off);
+        if (wet(off, y)) continue;
+        const v = point(off, y + along * p.grade - 0.04, along);
+        const light = 1 + 0.16 * smooth(0.47, 0.53, fbm(v.x / 55, v.z / 55));
+        tufts.push({ p: v, c: tuftColor.clone().multiplyScalar(light * (0.92 + hash(k, d) * 0.18)), s: 0.7 + hash(d, k * 3.9) * 0.9, r: hash(k, d * 0.7) * 3.14 });
       }
     }
 
     // Blumen, Büsche und Felsen
-    const along = (k: number) => (hash(k * 3.3, d * 0.77) - 0.5) * STEP;
-    const place = (off: number, k: number, s: number, sink = 0.05): Item => {
-      const al = along(k);
-      return { p: new THREE.Vector3(p.x + rx * off + Math.sin(p.heading) * al, onLine(off) + al * p.grade - sink, p.z + rz * off + Math.cos(p.heading) * al), ry: hash(d, k * 4.1) * 6.28, s };
+    const place = (off: number, k: number, s: number, sink = 0.05): Item | null => {
+      const al = (hash(k * 3.3, d * 0.77) - 0.5) * STEP;
+      const y = onLine(off);
+      if (onBridge || wet(off, y) || (S.town > 0.5 && Math.abs(off) < 24)) return null;
+      return { p: point(off, y + al * p.grade - sink, al), ry: hash(d, k * 4.1) * 6.28, s };
     };
     const sideOf = (k: number) => (hash(d * 0.11, k * 7.7) > 0.5 ? 1 : -1);
     for (let k = 0; k < (low ? 1 : 2); k++) {
       if (A.flowers && hash(d * 0.91 + k, k * 5.3) < 0.55 && fbm(p.x / 35 + k, p.z / 35) > 0.42) {
-        lists[ci].flowers.push(place(sideOf(k) * (4.9 + hash(d * 0.67, k * 3.3) * 9), k, 0.9 + hash(k, d) * 0.7, 0.02));
+        const it = place(sideOf(k) * (4.9 + hash(d * 0.67, k * 3.3) * 9), k, 0.9 + hash(k, d) * 0.7, 0.02);
+        if (it) lists[ci].flowers.push(it);
       }
     }
-    if (A.bush && hash(d * 0.43, 2.2) < (low ? 0.12 : 0.3)) lists[ci].bushes.push(place(sideOf(11) * (6.5 + hash(d * 0.29, 8.1) ** 1.4 * 40), 11, 0.8 + hash(d, 6.6) * 0.9, 0.08));
-    if (A.rocks.length && hash(d * 0.57, 9.4) < 0.11 * def.rockDensity) {
-      const which = Math.floor(hash(d, 1.9) * A.rocks.length);
-      lists[ci].rocks[which].push(place(sideOf(17) * (7 + hash(d * 0.21, 3.7) ** 1.3 * 60), 17, 0.6 + hash(d, 2.8) * 1.3, 0.25));
+    if (A.bush && hash(d * 0.43, 2.2) < (low ? 0.12 : 0.3)) {
+      const it = place(sideOf(11) * (6.5 + hash(d * 0.29, 8.1) ** 1.4 * 40), 11, 0.8 + hash(d, 6.6) * 0.9, 0.08);
+      if (it) lists[ci].bushes.push(it);
+    }
+    if (A.rocks.length && hash(d * 0.57, 9.4) < 0.11 * def.rockDensity * (1 + S.rocky * 2)) {
+      const it = place(sideOf(17) * (7 + hash(d * 0.21, 3.7) ** 1.3 * 60), 17, 0.6 + hash(d, 2.8) * 1.3, 0.25);
+      if (it) lists[ci].rocks[Math.floor(hash(d, 1.9) * A.rocks.length)].push(it);
     }
 
     // Bäume genau auf den Querschnittslinien, damit sie auf dem Gelände stehen
     if (totalWeight > 0) {
-      const density = def.treeDensity * (def.treeline ? 1 - smooth(1500, 1950, alt) : 1);
-      for (let k = 0; k < 9; k++) {
-        if (hash(d * 0.37 + k * 17.3, k + 3.1) > 0.4 * density) continue;
-        const off = sideOf(k + 30) * (10 + hash(d * 0.53, k * 2.9) ** 1.5 * 262);
+      const density = def.treeDensity * S.trees * (def.treeline ? 1 - smooth(1500, 1950, alt) : 1);
+      for (let k = 0; k < 22; k++) {
+        if (hash(d * 0.37 + k * 17.3, k + 3.1) > 0.3 * density) continue;
+        const off = sideOf(k + 30) * (10 + hash(d * 0.53, k * 2.9) ** 1.4 * 640);
+        const a = Math.abs(off);
+        if (S.town > 0.4 && a < 55) continue;
         const x = p.x + rx * off;
         const z = p.z + rz * off;
-        if (fbm(x / 90, z / 90) < 0.43) continue; // Wiesen und Lichtungen
+        if (fbm(x / 90, z / 90) < (S.trees > 1.5 ? 0.3 : 0.43)) continue; // Wiesen und Lichtungen
         const y = onLine(off);
-        if (y - p.y > def.rockBand[0] + 20) continue; // Fels
+        if (wet(off, y) || (onBridge && a < 30)) continue;
+        if (y - p.y > def.rockBand[0] + 20 - S.rocky * 50) continue; // Fels
         let pick = hash(x * 0.3, z * 0.3) * totalWeight;
         let type = 0;
         while (type < A.trees.length - 1 && pick > A.trees[type].weight) pick -= A.trees[type++].weight;
         const sc = A.trees[type].scale;
         const item: Item = { p: new THREE.Vector3(x + (hash(x, z) - 0.5) * 3, y - 0.15, z + (hash(z, x) - 0.5) * 3), ry: hash(k, d) * 6.28, s: lerp(sc[0], sc[1], hash(d, k)) };
-        (Math.abs(off) < nearLateral ? lists[ci].trees[type] : farTrees[type]).push(item);
+        (a < nearLateral ? lists[ci].trees[type] : farTrees[type]).push(item);
       }
     }
 
     // Zaun bzw. Mauer in einzelnen Abschnitten am Straßenrand
-    if (A.fence && i % Math.max(1, Math.round(A.fence.size.x / STEP)) === 0) {
+    if (A.fence && !onBridge && S.town < 0.3 && i % Math.max(1, Math.round(A.fence.size.x / STEP)) === 0) {
       const run = Math.floor(d / 260);
-      if (hash(run, 5.5) > 0.55 && d - run * 260 > 30 && d - run * 260 < 230) {
-        const s = hash(run, 8.8) > 0.5 ? 1 : -1;
-        fences.push({ p: new THREE.Vector3(p.x + rx * s * 6.4, onLine(s * 6.4) - 0.08, p.z + rz * s * 6.4), ry: p.heading - Math.PI / 2, s: STEP / A.fence.size.x, sy: 1 });
+      const s = hash(run, 8.8) > 0.5 ? 1 : -1;
+      const y = onLine(s * 6.4);
+      if (hash(run, 5.5) > 0.55 && d - run * 260 > 30 && d - run * 260 < 230 && !wet(s * 6.4, y) && y > p.y - 1.2) {
+        fences.push({ p: point(s * 6.4, y - 0.08), ry: p.heading - Math.PI / 2, s: STEP / A.fence.size.x, sy: 1 });
       }
     }
   }
@@ -517,8 +747,29 @@ function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | u
   road.userData.own = true;
   group.add(road);
 
+  const band = (b: { pos: number[]; uv: number[]; idx: number[] }, material: THREE.Material, receive: boolean) => {
+    if (!b.idx.length) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
+    g.setIndex(b.idx);
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g, material);
+    mesh.receiveShadow = receive;
+    mesh.castShadow = receive;
+    mesh.userData.own = true;
+    group.add(mesh);
+  };
+  if (K.waterMat) band(water, K.waterMat, false);
+  band(deck, K.stoneMat, shadow);
+  if (pillars.length) {
+    const pg = new THREE.BoxGeometry(6, 36, 1.6);
+    const im = instances(pg, K.stoneMat, pillars, shadow);
+    im.userData.ownGeometry = pg;
+    group.add(im);
+  }
+
   // Bewuchs je Abschnitt: nah als volles Modell, fern als Fernansicht
-  const shadow = !low;
   const chunks: Chunk[] = lists.map((l, ci) => {
     const near = new THREE.Group();
     const far = new THREE.Group();
@@ -551,19 +802,20 @@ function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | u
     im.receiveShadow = shadow;
     group.add(im);
   }
-  if (posts.length) group.add(instances(K.postGeo, K.postMat, posts, shadow));
-  if (A.guardrail && rails.length) group.add(instances(A.guardrail.geometry, A.guardrail.material, rails, shadow));
-  if (A.fence && fences.length) group.add(instances(A.fence.geometry, A.fence.material, fences, shadow));
-
-  // Gebäude, Tiere und andere Einzelstücke
-  const single = (model: Model, v: THREE.Vector3, ry: number, s = 1) => {
-    const mesh = new THREE.Mesh(model.geometry, model.material);
-    mesh.position.copy(v);
-    mesh.rotation.y = ry;
-    mesh.scale.setScalar(s);
-    mesh.castShadow = mesh.receiveShadow = shadow;
-    group.add(mesh);
+  const many = (model: Model | null, items: Item[]) => {
+    if (model && items.length) group.add(instances(model.geometry, model.material, items, shadow));
   };
+  if (posts.length) group.add(instances(K.postGeo, K.postMat, posts, shadow));
+  many(A.guardrail, rails);
+  many(rail, bridgeRails);
+  many(A.fence, fences);
+  many(A.lamp, lamps);
+  many(A.floating, floats);
+  houses.forEach((items, h) => many(A.houses[h], items));
+  people.forEach((items, s) => many(A.spectators[s], items));
+  for (const s of singles) many(s.model, [s.item]);
+
+  // Einzelstücke außerhalb der Dörfer: Gebäude, Tiere, Bögen
   A.props.forEach(({ def: pd, model }, pi) => {
     for (let k = Math.floor(d0 / pd.every); k <= Math.floor(d1 / pd.every); k++) {
       const d = (k + 0.2 + 0.6 * hash(k, pi * 7.3 + 1)) * pd.every;
@@ -572,10 +824,12 @@ function buildStrip(path: Path, d0: number, d1: number, K: Kit, route: Route | u
       for (let c = 0; c < (pd.count ?? 1); c++) {
         const off = pd.overRoad ? 0 : side * lerp(pd.off[0], pd.off[1], hash(k + c * 3.1, pi * 2.7));
         const g = ground(d + c * 7 * (hash(c, k) - 0.3), off);
+        // nicht im Dorf, nicht auf Brücken und nicht im Wasser
+        if (g.S.town > 0.3 || g.S.gorge > 0.05 || (!pd.overRoad && (off < 0 ? g.S.waterL : g.S.waterR) > 0.05)) continue;
         const ry = pd.overRoad ? g.heading : pd.faceRoad ? g.heading - (side * Math.PI) / 2 : hash(k * 1.3 + c, pi) * 6.28;
         if (pd.overRoad) g.v.y = g.roadY - 0.3;
         else g.v.y -= 0.12;
-        single(model, g.v, ry, pd.scale ?? 1);
+        many(model, [{ p: g.v, ry, s: pd.scale ?? 1 }]);
       }
     }
   });
@@ -636,6 +890,7 @@ function disposeStrip(g: THREE.Object3D) {
   g.traverse((o) => {
     const mesh = o as THREE.Mesh;
     if ((o as THREE.InstancedMesh).isInstancedMesh) (o as THREE.InstancedMesh).dispose();
+    (o.userData.ownGeometry as THREE.BufferGeometry | undefined)?.dispose();
     if (!mesh.userData.own) return;
     mesh.geometry?.dispose();
     for (const mt of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
@@ -668,7 +923,7 @@ function createWorld(el: HTMLDivElement, low: boolean, def: WorldDef, onState: (
 
   const haze = new THREE.Color(def.haze);
   const scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(def.haze, 0.0009);
+  scene.fog = new THREE.FogExp2(def.haze, 0.00055);
   const camera = new THREE.PerspectiveCamera(55, 1, 0.3, 9000);
 
   // Himmel: gemalter Verlauf von tiefem Blau zu hellem Dunst am Horizont
@@ -768,9 +1023,12 @@ function createWorld(el: HTMLDivElement, low: boolean, def: WorldDef, onState: (
         postGeo: new THREE.BoxGeometry(0.12, 1.0, 0.07).translate(0, 0.5, 0),
         postMat: toon({ color: 0xffffff }),
         signMat: toon({ color: 0xe6ecf5 }),
+        waterMat: A.water ? new THREE.MeshLambertMaterial({ map: A.water, transparent: true, opacity: def.still ? 1 : 0.9 }) : null,
+        stoneMat: new THREE.MeshLambertMaterial({ map: A.rock, color: A.rock ? 0xdddddd : 0x8a8f99, side: THREE.DoubleSide }),
         low,
       };
-      own.push(terrainMat, roadMap, tuftMap, kit.roadMat, kit.tuftGeo, kit.tuftMat, kit.postGeo, kit.postMat, kit.signMat);
+      own.push(terrainMat, roadMap, tuftMap, kit.roadMat, kit.tuftGeo, kit.tuftMat, kit.postGeo, kit.postMat, kit.signMat, kit.stoneMat);
+      if (kit.waterMat) own.push(kit.waterMat);
       for (const im of impostors) own.push(im.geometry, im.material, im.target);
 
       // Fahrer aus den Modellen; gelingt das nicht, bleibt der einfache Fahrer
@@ -790,6 +1048,7 @@ function createWorld(el: HTMLDivElement, low: boolean, def: WorldDef, onState: (
     .catch(() => onState('Die Welt konnte nicht geladen werden.'));
 
   let path: Path | null = null;
+  let layout: Layout | null = null;
   let routeId: string | undefined = '-';
   let strip: { group: THREE.Group; chunks: Chunk[] } | null = null;
   let stripCenter = NaN;
@@ -828,6 +1087,7 @@ function createWorld(el: HTMLDivElement, low: boolean, def: WorldDef, onState: (
     if (ride.route?.id !== routeId || !path) {
       routeId = ride.route?.id;
       path = new Path(ride.route);
+      layout = new Layout(def, path, ride.route);
       stripCenter = NaN;
       shown = { me: ride.dist, pacer: ride.pacer?.dist ?? 0, ghost: ride.ghost?.dist ?? 0 };
     }
@@ -837,8 +1097,10 @@ function createWorld(el: HTMLDivElement, low: boolean, def: WorldDef, onState: (
     const moving = ride.status === 'running';
     const ahead = moving ? Math.min(1.2, (now - seen.at) / 1000) : 0;
     const ease = Math.min(1, dt * 3);
-    shown.me += (ride.dist + ride.speed * ahead - shown.me) * ease;
-    if (Math.abs(ride.dist - shown.me) > 60) shown.me = ride.dist;
+    // Versatz nur für Tests: damit lässt sich jede Stelle der Welt ansehen, ohne hinzufahren
+    const here = ride.dist + ((window as unknown as { rollwerkOffset?: number }).rollwerkOffset ?? 0);
+    shown.me += (here + ride.speed * ahead - shown.me) * ease;
+    if (Math.abs(here - shown.me) > 60) shown.me = here;
 
     if (kit) {
       const center = Math.round(shown.me / 300) * 300;
@@ -847,10 +1109,13 @@ function createWorld(el: HTMLDivElement, low: boolean, def: WorldDef, onState: (
           scene.remove(strip.group);
           disposeStrip(strip.group);
         }
-        strip = buildStrip(path, center - 400, center + 1500, kit, ride.route);
+        strip = buildStrip(path, layout!, center - 400, center + 1900, kit, ride.route);
         scene.add(strip.group);
         stripCenter = center;
       }
+      // Wasser fließt langsam
+      const wm = kit.A.water;
+      if (wm && !def.still) wm.offset.set((now / 60000) % 1, (now / 90000) % 1);
       // volle Modelle nur in der Nähe des Fahrers, sonst die Fernansicht
       const reach = low ? 110 : 250;
       for (const c of strip!.chunks) {
